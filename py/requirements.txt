@@ -1,0 +1,20 @@
+# Python side of the local (on-device) engine.
+#
+# Inference only (py/cxr_worker.py):
+#   - with a .pte:        executorch, torch (the pybindings use torch tensors), numpy, pillow
+#   - PyTorch fallback:   torch, torchxrayvision, numpy, pillow
+# Export (scripts/export_cxr.py): everything below plus executorch.
+#
+# Pin executorch to the release the team tested. 1.0.0 is the first stable
+# release (Oct 2025); if `pip install executorch` fails on your platform see
+# scripts/setup-snapdragon.md (Windows on ARM needs a from-source build or the
+# PyTorch fallback).
+
+numpy>=1.26
+pillow>=10.0
+torch>=2.6
+torchvision>=0.21
+torchxrayvision>=1.3.0
+executorch>=1.0.0 ; platform_system != "Windows"
+# Optional, only for scripts/fetch_samples.py:
+# kaggle>=1.6

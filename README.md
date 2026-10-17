@@ -2,12 +2,94 @@
 
 **An open-source chest X-ray reader that shows its work.** A vision language model reads the film, reports the regions it looked at in order, and drafts a radiology report. The UI shows that reading path live as a red cloud moving over the image, then gives you an editable Exam / Findings / Impression, a one-click differential diagnosis and management panel, and a two-button rating that feeds a per-model benchmark.
 
-Works with any OpenAI-compatible endpoint (OpenAI, OpenRouter, vLLM, Ollama), the Anthropic API, or Amazon Bedrock. Ships with a mock engine so it runs with no API key.
+Works with any OpenAI-compatible endpoint (OpenAI, OpenRouter, vLLM, Ollama), the Anthropic API, or Amazon Bedrock. Ships with a mock engine so it runs with no API key, and a fully on-device `local` engine built on ExecuTorch (below).
 
 ![Reading](docs/screens/reading.png)
 
 > **Research prototype. Not for clinical use. The radiologist decides.**
 > OpenRead is for exploring how vision language models read radiographs. It is not a medical device, it has not been validated, and nothing it produces should be used to diagnose or treat a patient.
+
+## Run it fully on-device (ExecuTorch Hackathon)
+
+`ENGINE=local` replaces the single vision language model with a pipeline of small specialist
+models that run on the laptop with no network: a chest X-ray classifier exported to ExecuTorch,
+a reading path built from its activations, and a small local LLM (or a template) that writes the
+report. Built for the ExecuTorch Hackathon compute track (Dell Latitude 7455, Snapdragon X Elite,
+Windows on ARM): QNN/HTP for the NPU, XNNPACK on the CPU as the fallback.
+
+```
+            image
+              |
+              v
+   [1] findings model ......... py/cxr_worker.py  (Python, spawned once, JSON lines)
+       TorchXRayVision DenseNet-121 "densenet121-res224-all" as an ExecuTorch .pte
+       -> 18 pathology probabilities + a CAM box per pathology
+       (no .pte? falls back to PyTorch on CPU and says so)
+              |
+              v
+   [2] reading path ........... server/lib/findings.js  (JavaScript, deterministic)
+       lungs overview -> each positive finding with its CAM box, zoom: true
+       -> heart and mediastinum -> pleura and costophrenic angles -> bones and soft tissues
+       streamed as `path` events with a small delay, so the cloud animates
+              |
+              v
+   [3] report writer .......... LOCAL_LLM=
+       executorch          ExecuTorch Llama runner (llama_main) with a 4-bit Llama 3.2 3B or Qwen3 4B
+       openai-compatible   any local server (Ollama, LM Studio, vLLM) for testing on a Mac
+       template            no LLM: a deterministic report straight from the probabilities
+       -> `token` events while it streams, then `report`, then `done`
+       The same step answers "Show me differential diagnosis" (rule-based with template).
+```
+
+Three model roles, three files you can swap independently:
+
+| role | model | where | swap for |
+|---|---|---|---|
+| findings | TorchXRayVision DenseNet-121, 18 outputs, 224 px | `models/cxr-densenet121.pte` via `scripts/export_cxr.py` | any classifier that returns probs + feature maps (edit `py/cxr_model.py`) |
+| reading path | none, rules over the findings | `server/lib/findings.js` | a segmentation model for true lung fields |
+| report writer | Llama 3.2 3B Instruct or Qwen3 4B, 4-bit | `models/*.pte` via `scripts/export_llm.md` | any instruct model the runner loads |
+
+### Quickstart on the Dell (details in `scripts/setup-snapdragon.md`)
+
+```bash
+# 0. the pipeline with no models at all (canned findings, templated report): proves the plumbing
+ENGINE=local CXR_WORKER=py/cxr_worker_mock.py LOCAL_LLM=template npm run dev
+
+# 1. real classifier on CPU through PyTorch (downloads 30 MB of weights once)
+python -m venv .venv && . .venv/bin/activate         # .venv\Scripts\activate on Windows
+pip install -r py/requirements.txt
+ENGINE=local LOCAL_LLM=template npm run dev          # log says: falling back to PyTorch
+
+# 2. export to ExecuTorch and run the .pte (XNNPACK; add --backend qnn for the NPU, see the docs)
+python scripts/export_cxr.py                         # writes models/cxr-densenet121.pte + verification run
+ENGINE=local LOCAL_LLM=template npm run dev          # log says: findings worker ready, backend=executorch
+
+# 3. a local LLM writes the report
+#    a) tonight on a Mac: ollama pull llama3.2:3b, then
+ENGINE=local LOCAL_LLM=openai-compatible LOCAL_LLM_URL=http://localhost:11434/v1 LOCAL_LLM_MODEL=llama3.2:3b npm run dev
+#    b) on the device with ExecuTorch: scripts/export_llm.md, then LOCAL_LLM=executorch LLM_RUNNER=... LLM_MODEL=... LLM_TOKENIZER=...
+
+# 4. a labelled sample set and the agreement check
+python scripts/fetch_samples.py --n 40               # NIH ChestX-ray14 sample via Kaggle (see samples/README.md)
+ENGINE=local npm run bench                           # per-label agreement of the classifier's top finding
+```
+
+All variables are documented in `.env.example` under "local". `npm test` runs the local engine
+through `py/cxr_worker_mock.py`, so the test suite needs Python 3 but no PyTorch.
+
+### Honesty notes
+
+- The classifier is a **research model** (TorchXRayVision, trained on public datasets with
+  NLP-mined labels). Its **probabilities are not diagnoses**; they are the model's calibrated
+  outputs on its own operating point, and they are quoted as percentages so nobody mistakes them
+  for certainty.
+- The reading path shows **where the classifier's activation was strongest** for each finding
+  (class activation map, thresholded at 60% of its max, largest region). That is not a lesion
+  outline and not eye tracking. The anatomic order around those boxes is fixed by us, not chosen
+  by a model.
+- The report writer has **not seen the image**. It rewrites the classifier's findings. Negatives
+  are phrased "not flagged by the classifier", never "normal".
+- Nothing here is a medical device. The radiologist decides.
 
 ## 5-minute quickstart
 
@@ -145,9 +227,11 @@ Bench reads are rated blind: the UI does not show which model produced them. The
 ```
 server/            Express API (ESM)
   index.js         routes: /api/analyze (SSE), /api/ddx, /api/rate, /api/benchmark*
-  engines/         one interface, four engines
+  engines/         one interface, five engines
     base.js        makeEngine(): wraps a text generator into analyze()/complete()
     openai-compatible.js  anthropic.js  bedrock.js  mock.js
+    local.js       on-device pipeline: Python findings worker -> reading path -> local LLM/template
+  lib/findings.js  reading path, templated report, rule-based ddx and the report-writer prompt
   lib/prompt.js    the system prompt and the JSON contract
   lib/json.js      tolerant parser + incremental PathScanner
   lib/db.js        better-sqlite3: reads, ratings, summary, CSV
@@ -155,17 +239,23 @@ web/               Vite + React, plain JSX
   src/App.jsx      intake, reading, replay
   src/Film.jsx     the image, the cloud, the ring, the zoom inset
   src/ReportView.jsx  report, ddx panel, rating
-scripts/bench.mjs  run samples/ through the engine N times
+py/                cxr_model.py (shared wrapper), cxr_worker.py (ExecuTorch/PyTorch), cxr_worker_mock.py
+scripts/bench.mjs  run samples/ through the engine N times; label agreement with samples/labels.csv
 scripts/smoke.mjs  Playwright end-to-end run on the mock engine, writes docs/screens/
+scripts/export_cxr.py       classifier -> ExecuTorch .pte (XNNPACK or QNN)
+scripts/export_llm.md       Llama 3.2 3B / Qwen3 4B export and runner build
+scripts/setup-snapdragon.md Windows on ARM setup for the Dell
+scripts/fetch_samples.py    labelled public chest X-rays into samples/
+models/            exported .pte files (gitignored)
 test/              node:test unit tests
-samples/           CC0 sample images
+samples/           CC0 sample image; your own labelled set (gitignored), see samples/README.md
 data/              SQLite database (gitignored)
 ```
 
 ## Tests
 
 ```bash
-npm test          # node:test: JSON parser, PathScanner, engines, db
+npm test          # node:test: JSON parser, PathScanner, engines, db, local pipeline via the mock worker (needs python3)
 npm run smoke     # Playwright smoke on the mock engine; screenshots to docs/screens/
                   # set CHROME=/path/to/chrome if Chromium is not at the default path
 ```

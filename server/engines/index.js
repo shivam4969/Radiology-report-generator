@@ -6,13 +6,18 @@ const loaders = {
   anthropic: () => import('./anthropic.js'),
   bedrock: () => import('./bedrock.js'),
   mock: () => import('./mock.js'),
+  local: () => import('./local.js'),
 };
 
 export const ENGINE_NAMES = Object.keys(loaders).filter((k) => k !== 'openai');
 
 export function engineConfig() {
   const engine = (process.env.ENGINE || 'mock').toLowerCase();
-  const model = process.env.MODEL || (engine === 'mock' ? 'mock-cxr-v1' : '');
+  let model = process.env.MODEL || (engine === 'mock' ? 'mock-cxr-v1' : '');
+  if (!model && engine === 'local') {
+    // findings model + report writer, so bench ratings stay per pipeline
+    model = `densenet121-res224-all+${(process.env.LOCAL_LLM || 'template').toLowerCase()}`;
+  }
   return { engine, model };
 }
 

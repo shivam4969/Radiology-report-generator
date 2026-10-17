@@ -69,6 +69,11 @@ app.post('/api/analyze', async (req, res) => {
       } else if (ev.type === 'report') {
         report = ev.report;
         send('report', { report });
+      } else if (ev.type === 'findings') {
+        // local engine: classifier probabilities and CAM boxes
+        send('findings', { probs: ev.probs, cams: ev.cams, backend: ev.backend, ms: ev.ms });
+      } else if (ev.type === 'token') {
+        send('token', { text: ev.text });
       } else if (ev.type === 'error') {
         send('error', { message: ev.message, raw: ev.raw?.slice?.(0, 2000) });
       } else if (ev.type === 'done') {

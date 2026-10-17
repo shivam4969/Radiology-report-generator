@@ -5,3 +5,17 @@ data/*.db-wal
 data/*.db-shm
 web/dist/
 .DS_Store
+# local engine: model weights and downloaded datasets are never committed
+models/*.pte
+models/*.meta.json
+models/*.bin
+models/*.pth
+models/*.safetensors
+models/*.gguf
+data/downloads/
+samples/*
+!samples/README.md
+!samples/cxr-pneumonia-cc0.jpg
+samples/_rsna_png/
+__pycache__/
+.venv/
