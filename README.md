@@ -9,6 +9,8 @@ Works with any OpenAI-compatible endpoint (OpenAI, OpenRouter, vLLM, Ollama), th
 > **Research prototype. Not for clinical use. The radiologist decides.**
 > OpenRead is for exploring how vision language models read radiographs. It is not a medical device, it has not been validated, and nothing it produces should be used to diagnose or treat a patient.
 
+**Hackathon plan:** the five-task pipeline, the Snapdragon ladder, the Astra-reference benchmark and dataset notes are in [docs/PLAN.md](docs/PLAN.md).
+
 ## Run it fully on-device (ExecuTorch Hackathon)
 
 `ENGINE=local` replaces the single vision language model with a pipeline of small specialist
