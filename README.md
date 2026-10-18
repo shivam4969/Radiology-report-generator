@@ -1,4 +1,4 @@
-# OpenRead
+# Radio Warriors (OpenRead)
 
 **An open-source chest X-ray reader that shows its work.** A vision language model reads the film, reports the regions it looked at in order, and drafts a radiology report. The UI shows that reading path live as a red cloud moving over the image, then gives you an editable Exam / Findings / Impression, a one-click differential diagnosis and management panel, and a two-button rating that feeds a per-model benchmark.
 
