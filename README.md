@@ -1,5 +1,7 @@
 # Radio Warriors (OpenRead)
 
+> New: `LOCAL_READER=internvl3` or `smolvlm` puts a vision-language model on the film instead of the classifier (`scripts/export_vlm.md`).
+>
 > Looking for the minimal version? [cxr-read](https://github.com/dictora-ai/cxr-read): one film in, one report out, plus a scorer against NIH labels. Two files, no UI, no toggles.
 
 

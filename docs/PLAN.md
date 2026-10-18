@@ -10,7 +10,7 @@ open models, each doing one job, and benchmarked against a frontier reference re
 | # | Task | In | Out | Open models to try (under 25 GB) |
 |---|------|----|-----|----------------------------------|
 | 1 | **Triage**: readable PA film? anything urgent? | image | flags: projection, rotation, lines and tubes, pneumothorax, large effusion, free air | TorchXRayVision DenseNet-121 (30 MB), MedSigLIP + linear head, RAD-DINO + linear head |
-| 2 | **Findings**: what is abnormal, where | image | checklist of findings with probability and box | DenseNet-121 (18 labels, Grad-CAM boxes, in `ENGINE=local` now), MedGemma 1.5 4B, CheXagent-2 3B, Qwen3-VL 8B |
+| 2 | **Findings**: what is abnormal, where | image | checklist of findings with probability and box, or prose | DenseNet-121 (18 labels, Grad-CAM boxes, in `ENGINE=local` now); **InternVL3 1B and SmolVLM 500M** (vision-language, `LOCAL_READER=internvl3|smolvlm`, both on the Qualcomm backend list, see `scripts/export_vlm.md`); MedGemma 1.5 4B, CheXagent-2 3B |
 | 3 | **Comparison**: what changed since the prior | findings + prior report or image | new / resolved / larger / smaller / stable | Qwen3 4B or Llama 3.2 3B for a prior report; the task 2 VLM for a prior image; MAIRA-2 does this natively |
 | 4 | **Report**: write it the way a radiologist would | history + findings + change + template | Exam / Findings / Impression JSON | Llama 3.2 3B Instruct (best ExecuTorch path, NPU), Qwen3 4B, Phi-4 mini |
 | 5 | **Reasoning**: differential, management, self-check | the report text only | differentials with reasons, next step with guideline, consistency critique | Qwen3 8B thinking, MedGemma 27B text (4-bit), DeepSeek-R1 distill 7B. Use a different family from task 4 so it is not grading its own prose |
@@ -24,7 +24,8 @@ See `scripts/setup-snapdragon.md`. The ladder, each rung a working demo:
 1. Node + mock worker (`ENGINE=mock`): UI works, no models.
 2. `ENGINE=local` with the PyTorch worker on CPU (`LOCAL_LLM=template`): real classifier, templated report.
 3. Classifier exported to ExecuTorch, XNNPACK backend (`scripts/export_cxr.py`), still CPU.
-4. LLM through the ExecuTorch Llama runner (`scripts/export_llm.md`).
+4. LLM through the ExecuTorch Llama runner (`scripts/export_llm.md`). Text writers on the Qualcomm list, best first for the size: Qwen3 1.7B, Llama 3.2 3B, Phi4-mini, Gemma 3 1B. Stories 110M and SmolLM2 135M are smoke tests only.
+4b. VLM reader (InternVL3 1B, then SmolVLM 500M) in PyTorch, then as a `.pte` on QNN (`scripts/export_vlm.md`).
 5. QNN backend: classifier, then LLM, on the Hexagon NPU. The stretch goal, and what judges will ask about.
 
 The NPU matters because a 3B model that runs at 3 to 8 tokens a second on the CPU runs at 15 to 30 on the

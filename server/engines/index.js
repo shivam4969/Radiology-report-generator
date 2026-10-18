@@ -16,7 +16,9 @@ export function engineConfig() {
   let model = process.env.MODEL || (engine === 'mock' ? 'mock-cxr-v1' : '');
   if (!model && engine === 'local') {
     // findings model + report writer, so bench ratings stay per pipeline
-    model = `densenet121-res224-all+${(process.env.LOCAL_LLM || 'template').toLowerCase()}`;
+    const reader = (process.env.LOCAL_READER || 'densenet').toLowerCase();
+    const readerName = reader === 'densenet' ? 'densenet121-res224-all' : reader === 'internvl3' ? 'internvl3-1b' : reader === 'smolvlm' ? 'smolvlm-500m' : reader;
+    model = `${readerName}+${(process.env.LOCAL_LLM || 'template').toLowerCase()}`;
   }
   return { engine, model };
 }

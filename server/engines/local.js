@@ -14,6 +14,15 @@
 //   CXR_MAX_FINDINGS      max positive findings shown on the path (default 4)
 //   LOCAL_PATH_DELAY_MS   pause between path items so the UI animates (default 600)
 //
+//   LOCAL_READER          densenet | internvl3 | smolvlm   (default densenet)
+//                         densenet: the 18-label classifier above (boxes, reading path, probabilities)
+//                         internvl3 / smolvlm: a vision-language model LOOKS at the film and writes what it
+//                         sees in prose (py/vlm_worker.py). No boxes, no fixed search pattern, no
+//                         probabilities: the model reads the way it reads. Its prose goes to the writer.
+//   VLM_PYTHON            python for the VLM worker (default CXR_PYTHON)
+//   VLM_WORKER            worker script (default py/vlm_worker.py; tests use a stub)
+//   VLM_MAX_NEW_TOKENS    default 400
+//
 //   LOCAL_LLM             template | executorch | openai-compatible   (default template)
 //   LLM_RUNNER            executorch: path to the llama runner binary (llama_main / llama_main.exe)
 //   LLM_MODEL             executorch: the LLM .pte
@@ -50,6 +59,8 @@ const THRESHOLD = Number(env('CXR_THRESHOLD', 0.5));
 const MAX_FINDINGS = Number(env('CXR_MAX_FINDINGS', 4));
 const PATH_DELAY = Number(env('LOCAL_PATH_DELAY_MS', 600));
 const LLM = env('LOCAL_LLM', 'template').toLowerCase();
+const READER = env('LOCAL_READER', 'densenet').toLowerCase();
+const VLM_WORKER = resolve(ROOT, env('VLM_WORKER', 'py/vlm_worker.py')); // tests point this at a stub
 const MAX_NEW_TOKENS = Number(env('LLM_MAX_NEW_TOKENS', 700));
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -140,6 +151,73 @@ export function stopWorker() {
   worker = null;
 }
 process.on('exit', stopWorker);
+
+// ------------------------------------------------------------- VLM reader -----
+
+let vlm = null; // { proc, pending, ready }
+let vlmId = 1;
+
+function startVlm() {
+  const py = env('VLM_PYTHON', PYTHON);
+  log(`starting VLM reader: ${py} ${VLM_WORKER} --model ${READER}`);
+  const proc = spawn(py, [VLM_WORKER, '--model', READER], { stdio: ['pipe', 'pipe', 'pipe'] });
+  const pending = new Map();
+  let resolveReady, rejectReady;
+  const ready = new Promise((res, rej) => { resolveReady = res; rejectReady = rej; });
+  createInterface({ input: proc.stderr }).on('line', (l) => log(l));
+  createInterface({ input: proc.stdout }).on('line', (line) => {
+    let msg;
+    try { msg = JSON.parse(line); } catch { return log('vlm (non-JSON):', line); }
+    if (msg.event === 'ready') { log(`VLM ready: ${msg.model} on ${msg.device}`); resolveReady(msg); return; }
+    if (msg.event === 'error') { rejectReady(new Error(`VLM reader: ${msg.error}`)); return; }
+    const p = pending.get(msg.id);
+    if (!p) return;
+    pending.delete(msg.id);
+    if (msg.error) p.reject(new Error(`VLM reader: ${msg.error}`));
+    else p.resolve(msg);
+  });
+  proc.on('exit', (code, signal) => {
+    const err = new Error(`VLM reader exited (code ${code}${signal ? `, ${signal}` : ''}). Run \`${py} ${VLM_WORKER} --model ${READER} --once samples/cxr-pneumonia-cc0.jpg\` to debug.`);
+    rejectReady(err);
+    for (const p of pending.values()) p.reject(err);
+    pending.clear();
+    vlm = null;
+  });
+  return { proc, pending, ready };
+}
+
+/** The VLM's prose for one film. */
+export async function readWithVlm(imageBase64, mime = 'image/jpeg', history = '') {
+  if (!vlm) vlm = startVlm();
+  const v = vlm;
+  await v.ready;
+  const id = vlmId++;
+  const result = new Promise((resolve, reject) => v.pending.set(id, { resolve, reject }));
+  v.proc.stdin.write(JSON.stringify({ id, image_b64: imageBase64, mime, history }) + '\n');
+  return result;
+}
+
+export function stopVlm() {
+  if (vlm?.proc && !vlm.proc.killed) vlm.proc.kill('SIGTERM');
+  vlm = null;
+}
+process.on('exit', stopVlm);
+
+/** Split free prose into findings and impression without changing a word: an "Impression" heading if the
+ *  model wrote one, otherwise the last sentence. */
+function proseToReport(text) {
+  const t = String(text || '').trim();
+  const m = /\n\s*(?:\*\*)?impression(?:\*\*)?\s*:?\s*/i.exec(t);
+  if (m) return { exam: 'Chest radiograph, one view.', findings: t.slice(0, m.index).replace(/^\s*(?:\*\*)?findings(?:\*\*)?\s*:?\s*/i, '').trim(), impression: t.slice(m.index + m[0].length).trim() };
+  const sentences = t.split(/(?<=[.!?])\s+/);
+  const impression = sentences.length > 1 ? sentences.pop() : t;
+  return { exam: 'Chest radiograph, one view.', findings: sentences.join(' ') || t, impression };
+}
+
+const VLM_WRITER_SYSTEM = `You are OpenRead's report writer, running fully on-device. A vision-language model has looked at a chest radiograph and described it; you have NOT seen the image. Turn that description into a draft chest radiograph report for a radiologist to review.
+Answer with ONE JSON object and nothing else. No prose, no markdown fences:
+{ "report": { "exam": "Chest radiograph, one view.", "findings": "...", "impression": "..." } }
+Rules: use only what the description says; do not add findings, negatives or measurements it does not contain; keep its uncertainty; plain text.`;
 
 // ------------------------------------------------------------------ LLM -----
 
@@ -249,6 +327,10 @@ function llmGenerator(system, user) {
   throw new Error(`LOCAL_LLM="${LLM}" is not one of template, executorch, openai-compatible`);
 }
 
+export function readerLabel() {
+  return READER === 'densenet' ? 'densenet121-res224-all' : READER === 'internvl3' ? 'OpenGVLab/InternVL3-1B' : READER === 'smolvlm' ? 'HuggingFaceTB/SmolVLM-500M-Instruct' : READER;
+}
+
 export function llmLabel() {
   if (LLM === 'template') return 'template';
   if (LLM === 'executorch') return `executorch:${env('LLM_MODEL', '').split(/[\\/]/).pop() || '?'}`;
@@ -258,6 +340,10 @@ export function llmLabel() {
 // -------------------------------------------------------------- engine -----
 
 async function* analyze({ imageBase64, mime = 'image/jpeg', history = '' }) {
+  if (READER !== 'densenet') {
+    yield* analyzeWithVlm({ imageBase64, mime, history });
+    return;
+  }
   let findings;
   try {
     findings = await classify(imageBase64, mime);
@@ -301,6 +387,42 @@ async function* analyze({ imageBase64, mime = 'image/jpeg', history = '' }) {
   yield { type: 'done', raw, findings: { top: topFinding(findings.probs), backend: findings.backend } };
 }
 
+/** LOCAL_READER=internvl3|smolvlm: the VLM reads the film; its prose becomes the report (template) or is
+ *  rewritten by the local LLM. No reading path is emitted: nothing told the model where to look. */
+async function* analyzeWithVlm({ imageBase64, mime, history }) {
+  let read;
+  try {
+    read = await readWithVlm(imageBase64, mime, history);
+  } catch (err) {
+    yield { type: 'error', message: err.message };
+    return;
+  }
+  yield { type: 'findings', probs: {}, cams: {}, backend: `vlm:${read.model}`, ms: read.ms, text: read.text };
+  let report;
+  let raw = '';
+  if (LLM === 'template') {
+    report = proseToReport(read.text);
+    raw = JSON.stringify({ report });
+  } else {
+    const user = `Clinical history: ${(history || '').trim() || 'none provided'}\n\nDescription of the film by ${read.model}:\n${read.text}`;
+    try {
+      for await (const ev of llmGenerator(VLM_WRITER_SYSTEM, user)) {
+        if (ev.type === 'delta' && ev.text) { raw += ev.text; yield { type: 'token', text: ev.text }; }
+      }
+      const obj = parseModelJson(raw);
+      const r = obj?.report ?? (obj?.findings || obj?.impression ? obj : null);
+      if (!r) throw new Error('report writer did not return parseable JSON');
+      report = normalizeReport(r);
+    } catch (err) {
+      log(`report writer failed (${err.message}); using the VLM prose as the report`);
+      report = proseToReport(read.text);
+      raw = raw || JSON.stringify({ report });
+    }
+  }
+  yield { type: 'report', report };
+  yield { type: 'done', raw, findings: { top: null, backend: `vlm:${read.model}` } };
+}
+
 /** Text-only completion, used by /api/ddx. */
 async function complete({ system, text }) {
   if (LLM === 'template') return JSON.stringify(templateDdx(text));
@@ -309,4 +431,4 @@ async function complete({ system, text }) {
   return out;
 }
 
-export default { name: 'local', analyze, complete, classify, stopWorker };
+export default { name: 'local', analyze, complete, classify, stopWorker, readWithVlm, stopVlm };
