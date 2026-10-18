@@ -24,6 +24,7 @@ export function makeEngine(name, generate) {
       for await (const ev of generate({
         system: SYSTEM_PROMPT,
         text: userMessage(history),
+        history,
         image: { base64: imageBase64, mime },
         model,
       })) {

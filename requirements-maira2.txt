@@ -1,0 +1,10 @@
+# Python sidecar for ENGINE=maira2. The Node app does not import these.
+# On a CUDA machine, install the matching torch build from pytorch.org first.
+torch>=2.2
+# microsoft/maira-2 was saved with transformers 4.51.3. 5.x calls
+# get_image_features without the arguments that remote code requires.
+transformers==4.51.3
+sentencepiece>=0.2
+protobuf>=4
+pillow>=10
+accelerate>=0.34

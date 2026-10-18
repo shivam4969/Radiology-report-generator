@@ -152,6 +152,97 @@ MODEL=qwen3-vl
 
 Leave `OPENAI_API_KEY` empty for local servers. If your server does not stream, set `OPENAI_NO_STREAM=1`; OpenRead will emit the whole reading path at the end instead of live. Small models sometimes wrap the JSON in code fences or add prose; the parser tolerates both. If a model keeps returning unparseable output, the UI shows the raw text so you can tune the prompt in `server/lib/prompt.js`.
 
+### MAIRA-2
+
+[MAIRA-2](https://huggingface.co/microsoft/maira-2) writes a chest X-ray Findings section and, in grounded mode, a box for each finding it can localise. OpenRead runs the weights in a Python sidecar and maps that output onto the usual reading path and report. It does not go through the OpenAI-compatible engine: the model has its own processor and its own box tokens.
+
+Accept the model license on the Hugging Face page first. The weights are released for research.
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements-maira2.txt
+npm run maira2          # loads microsoft/maira-2, listens on http://127.0.0.1:8008
+```
+
+In `.env`:
+
+```ini
+ENGINE=maira2
+MODEL=microsoft/maira-2
+MAIRA2_BASE_URL=http://127.0.0.1:8008
+```
+
+Restart `npm run dev`. The first `npm run maira2` downloads the checkpoint (on the order of 15 GB). The sidecar uses CUDA when it is present, otherwise Apple Metal, otherwise CPU. CPU will run and will be slow. Override with `MAIRA2_DEVICE` and `MAIRA2_DTYPE` if you need to.
+
+What the sidecar returns becomes:
+
+- one reading-path item per box, with `zoom` set, in the model’s finding order
+- `findings`: every sentence, including ones with no box (normal anatomy, or a finding the model did not localise)
+- `impression`: those same sentences, numbered. MAIRA-2 does not write an Impression section, so this field is the findings list and not a separate summary
+- `exam`: frontal view, or frontal and lateral when a lateral image was sent to the sidecar
+
+The history line is passed as the study indication. Lateral, prior film, and prior report are accepted by `POST /read` on the sidecar. The current intake screen sends the single frontal image.
+
+Differential diagnosis is a text task this model was not trained for. Leave that button unused, or point it at another engine:
+
+```ini
+DDX_ENGINE=openai-compatible
+DDX_MODEL=gpt-4o
+```
+
+### CheXagent
+
+[CheXagent-2-3b](https://huggingface.co/StanfordAIMI/CheXagent-2-3b) writes a findings section. It does not emit boxes, so the reading path stays empty and the text lands in the report. The weights run in a Python sidecar. The build that serves on an Apple GPU is three INT4 ExecuTorch Metal programs, not the PyTorch checkpoint.
+
+```bash
+DYLD_INSERT_LIBRARIES=$PWD/chexagent-executorch/metal/libmetal_interpose.dylib \
+CHEXAGENT_RUNTIME=metal \
+.venv/bin/python scripts/chexagent_generate_pte_server.py
+```
+
+In `.env`, point the app at that sidecar and restart `npm run dev`:
+
+```ini
+ENGINE=chexagent
+MODEL=StanfordAIMI/CheXagent-2-3b
+CHEXAGENT_BASE_URL=http://127.0.0.1:8010
+```
+
+`GET http://127.0.0.1:8010/health` should report `"runtime": "metal"` and `"device": "mps"`. Differential diagnosis is a text task this model was not trained for. Point that button at another engine with `DDX_ENGINE` and `DDX_MODEL`, the same way as MAIRA-2.
+
+CheXagent's normal forward cannot be one `.pte`. A `.pte` is a frozen graph: shapes are fixed, and the graph cannot open files, call Python, or loop until it decides to stop. The stock model does all three. A real prompt, with the film spliced in, is about 1,085 tokens, and an earlier `text_decoder.pte` was one forward of 8 tokens with no cache, so it could not write a report. The export splits the model into three static programs and a Python runner stitches them back together.
+
+| Program | File | Job |
+| --- | --- | --- |
+| Vision | `vision_encoder.pte` (about 206 MB) | 512×512 film → 1,024 embeddings of size 2,560 |
+| Prefill | `text_prefill.pte` (about 1.4 GB) | The whole prompt, padded to 1,536 tokens → next-token logits and a KV cache |
+| Decode | `text_decode.pte` (about 1.4 GB) | One new embedding plus that cache → the next logits |
+
+The runner resizes the film and hands the vision program a float16 tensor. It looks up prompt token ids in the word-embedding table, which stays outside the graphs, and pastes the 1,024 image embeddings into the image span. Prefill then runs once. Decode repeats one token at a time until end-of-sequence (token 50256) or 160 tokens. Prefill and decode are the same Phi stack (32 layers, 32 heads, head size 80, hidden size 2,560) exported at two shapes, because a `.pte` cannot change its sequence length. The cache holds 2,048 positions, which is the model's maximum. Before the weights were packed, this stack matched the full model on the first two tokens (58, then 33).
+
+The linear layers are stored as INT4, group size 32. Every 32 weights share one float16 scale. Each weight is rounded to an integer from −8 to 7, and two of those codes are packed into one byte. At runtime the bytes are unpacked and the multiply runs in float16. Activations, the embedding table, and the KV cache stay float16. Layer norms stay float32, because the float16 norm drifts. Both text programs carry a full copy of the language-model weights, which is why each one is about 1.4 GB instead of the earlier 5.3 GB float16 file.
+
+Those three graphs are lowered twice. `chexagent-executorch/*.pte` is the portable CPU lowering. `chexagent-executorch/metal/*.pte` is the Apple GPU lowering, and that is what the sidecar above serves. The stock Metal runtime only accepts float32 and bfloat16, so the local backend accepts float16 and implements float16 matmul. Metal inputs stay on the CPU and the runtime copies them to the GPU. The same graphs also exist as PyTorch `.pt2` files. `torch.export` bakes in CPU device checks, so those files do not move to MPS until the checks are stripped and the factory ops are retargeted. That `.pt2` path is `npm run chexagent:pt2`. The CPU `.pte` files cannot be moved onto MPS at all: ExecuTorch lowered them to CPU kernels.
+
+On the sample film the Metal path writes a findings paragraph, beginning `[Breathing: Lungs] There is a large area of consolidation in the right lower lobe.` The CPU `.pte` path produces the same kind of paragraph and is much slower: prefill of this prompt took about 71 minutes, then about 45 seconds per new token.
+
+#### Snapdragon
+
+The ExecuTorch runtime Derrick supplied is a CPU runtime. It was not built for arm64 with an NPU delegate or a GPU delegate, so the three CheXagent programs lowered against it contain CPU kernels only. Copying those `.pte` files onto a Snapdragon product does not move the work onto the Hexagon NPU or the Adreno GPU. The Mac Metal lowering is a different backend and does not run on that chip either. With that runtime, CheXagent could not be built onto the product NPU or GPU.
+
+What runs on a GPU locally in this track is SmolVLM-500 in GGUF. A GGUF runtime executes that model on the GPU of the machine it is running on.
+
+The next build on this compute track is an on-device ExecuTorch for the Snapdragon, aimed at arm64 and the NPU. The three CheXagent programs would be lowered again with that backend. The files in `chexagent-executorch/` stay the CPU build.
+
+That build has four parts:
+
+- Compile the ExecuTorch runtime with the Snapdragon toolchain for arm64 and link Qualcomm's NPU backend. The runtime Derrick supplied has no NPU or GPU delegate, so this is a new runtime, not a flag on the one we have.
+- Lower `vision_encoder`, `text_prefill`, and `text_decode` again so the matmul and attention land on the Hexagon NPU. A CPU `.pte` copied onto the device still runs on the CPU.
+- Quantize in the scheme that backend accepts. The INT4 in these files is packed bytes that get unpacked back to float16 before the multiply. The NPU path needs weights the NPU can multiply directly.
+- Fit the model on the device. Each text program is about 1.4 GB because prefill and decode each carry a full copy of the weights. A phone cannot hold both. A Snapdragon laptop can load them, and sharing one weight blob between prefill and decode is what makes a smaller device realistic.
+
+SmolVLM-500 in GGUF stays the local GPU model until that NPU build exists.
+
 ## What you see
 
 1. **Intake.** Paste (Ctrl+V), drop, or choose a chest X-ray. Add a history line. Click the orange **Analyze**.
@@ -234,20 +325,25 @@ Bench reads are rated blind: the UI does not show which model produced them. The
 ```
 server/            Express API (ESM)
   index.js         routes: /api/analyze (SSE), /api/ddx, /api/rate, /api/benchmark*
-  engines/         one interface, five engines
+  engines/         one interface: mock, openai-compatible, anthropic, bedrock, local, maira2, chexagent
     base.js        makeEngine(): wraps a text generator into analyze()/complete()
-    openai-compatible.js  anthropic.js  bedrock.js  mock.js
+    openai-compatible.js  anthropic.js  bedrock.js  mock.js  maira2.js  chexagent.js
     local.js       on-device pipeline: Python findings worker -> reading path -> local LLM/template
   lib/findings.js  reading path, templated report, rule-based ddx and the report-writer prompt
   lib/prompt.js    the system prompt and the JSON contract
   lib/json.js      tolerant parser + incremental PathScanner
+  lib/maira2.js    maps grounded findings onto the reading path and report
   lib/db.js        better-sqlite3: reads, ratings, summary, CSV
 web/               Vite + React, plain JSX
   src/App.jsx      intake, reading, replay
   src/Film.jsx     the image, the cloud, the ring, the zoom inset
   src/ReportView.jsx  report, ddx panel, rating
 py/                cxr_model.py (shared wrapper), cxr_worker.py (ExecuTorch/PyTorch), cxr_worker_mock.py
+docs/chexagent-executorch.md   how the INT4 Metal .pte programs were built
 scripts/bench.mjs  run samples/ through the engine N times; label agreement with samples/labels.csv
+scripts/maira2_server.py   microsoft/maira-2 sidecar used by ENGINE=maira2
+scripts/chexagent_server.py              full PyTorch CheXagent sidecar
+scripts/chexagent_generate_pte_server.py generation graphs: vision, prefill, decode
 scripts/smoke.mjs  Playwright end-to-end run on the mock engine, writes docs/screens/
 scripts/export_cxr.py       classifier -> ExecuTorch .pte (XNNPACK or QNN)
 scripts/export_llm.md       Llama 3.2 3B / Qwen3 4B export and runner build

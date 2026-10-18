@@ -23,6 +23,16 @@ async function getEngine() {
   return engine;
 }
 
+// Differential diagnosis is a text task. MAIRA-2 only drafts grounded findings,
+// so DDX_ENGINE can point that call at another registered engine.
+let ddxEngine;
+async function getDdxEngine() {
+  const name = (process.env.DDX_ENGINE || '').toLowerCase();
+  if (!name || name === ENGINE) return getEngine();
+  if (!ddxEngine) ddxEngine = await loadEngine(name);
+  return ddxEngine;
+}
+
 app.get('/api/config', (_req, res) => {
   res.json({ engine: ENGINE, model: MODEL });
 });
@@ -115,13 +125,14 @@ app.post('/api/ddx', async (req, res) => {
         : '';
   if (!text.trim()) return res.status(400).json({ error: 'report text is required' });
   try {
-    const eng = await getEngine();
-    const raw = await eng.complete({ system: DDX_SYSTEM_PROMPT, text: `Draft report:\n\n${text}`, model: MODEL });
+    const eng = await getDdxEngine();
+    const ddxModel = process.env.DDX_MODEL || MODEL;
+    const raw = await eng.complete({ system: DDX_SYSTEM_PROMPT, text: `Draft report:\n\n${text}`, model: ddxModel });
     const obj = parseModelJson(raw);
     if (!obj || !Array.isArray(obj.items)) {
       return res.status(502).json({ error: 'Model did not return parseable JSON', raw: raw.slice(0, 2000) });
     }
-    res.json({ items: obj.items, model: MODEL });
+    res.json({ items: obj.items, model: ddxModel });
   } catch (err) {
     res.status(502).json({ error: err?.message || String(err) });
   }

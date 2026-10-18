@@ -33,7 +33,7 @@ test('mock engine answers the ddx prompt with parseable JSON', async () => {
 });
 
 test('registry knows every engine', async () => {
-  assert.deepEqual(ENGINE_NAMES.sort(), ['anthropic', 'bedrock', 'local', 'mock', 'openai-compatible']);
+  assert.deepEqual(ENGINE_NAMES.sort(), ['anthropic', 'bedrock', 'chexagent', 'local', 'maira2', 'mock', 'openai-compatible']);
   const e = await loadEngine('mock');
   assert.equal(e.name, 'mock');
   await assert.rejects(loadEngine('nope'), /Unknown ENGINE/);

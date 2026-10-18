@@ -5,6 +5,8 @@ const loaders = {
   openai: () => import('./openai-compatible.js'),
   anthropic: () => import('./anthropic.js'),
   bedrock: () => import('./bedrock.js'),
+  maira2: () => import('./maira2.js'),
+  chexagent: () => import('./chexagent.js'),
   mock: () => import('./mock.js'),
   local: () => import('./local.js'),
 };

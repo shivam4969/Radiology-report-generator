@@ -11,8 +11,8 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      '/api': API,
-      '/samples': API,
+      '/api': { target: API, timeout: 0, proxyTimeout: 0 },
+      '/samples': { target: API, timeout: 0, proxyTimeout: 0 },
     },
   },
   build: { outDir: 'dist', emptyOutDir: true },

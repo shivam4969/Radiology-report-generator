@@ -1,9 +1,16 @@
 node_modules/
+__pycache__/
+*.pyc
+.venv/
+.venv-chexagent/
 .env
 data/*.db
 data/*.db-wal
 data/*.db-shm
 web/dist/
+models/
+chexagent-executorch/
+medgemma-executorch/
 .DS_Store
 # local engine: model weights and downloaded datasets are never committed
 models/*.pte
@@ -17,5 +24,3 @@ samples/*
 !samples/README.md
 !samples/cxr-pneumonia-cc0.jpg
 samples/_rsna_png/
-__pycache__/
-.venv/
