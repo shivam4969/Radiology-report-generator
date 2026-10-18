@@ -1,5 +1,8 @@
 # Radio Warriors (OpenRead)
 
+> Looking for the minimal version? [cxr-read](https://github.com/dictora-ai/cxr-read): one film in, one report out, plus a scorer against NIH labels. Two files, no UI, no toggles.
+
+
 **An open-source chest X-ray reader that shows its work.** A vision language model reads the film, reports the regions it looked at in order, and drafts a radiology report. The UI shows that reading path live as a red cloud moving over the image, then gives you an editable Exam / Findings / Impression, a one-click differential diagnosis and management panel, and a two-button rating that feeds a per-model benchmark.
 
 Works with any OpenAI-compatible endpoint (OpenAI, OpenRouter, vLLM, Ollama), the Anthropic API, or Amazon Bedrock. Ships with a mock engine so it runs with no API key, and a fully on-device `local` engine built on ExecuTorch (below).
